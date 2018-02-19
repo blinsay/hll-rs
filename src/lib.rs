@@ -23,12 +23,12 @@ impl HLL {
     pub fn add_raw(&mut self, value: u32) {
         let j = (value as usize) & (self.m - 1);
         let w = value >> self.b;
-        // NOTE(benl): the paper defines p(0^k) == k + 1 but lowest_one_bit(0) == 0
+        // NOTE(benl): the paper defines p(0^k) == k + 1 but 0.trailing_zeros() == 0
         // so we have to correct here
         let p_w = 1 + if value == 0 {
             (32 - self.b) + 1
         } else {
-            lowest_one_bit(w)
+            w.trailing_zeros() as usize
         };
         self.registers.set_max(j, p_w as u8);
     }
@@ -333,45 +333,5 @@ mod test_registers {
         fn qc_iter_length(tc: TestCase) -> bool {
             Registers::new(tc.width, tc.len).iter().count() == tc.len
         }
-    }
-}
-
-const _MULTIPLY_DEBRUJIN_POSITION: [usize; 32] = [
-    0, 1, 28, 2, 29, 14, 24, 3, 30, 22, 20, 15, 25, 17, 4, 8, 31, 27, 13, 23, 21, 19, 16, 7, 26,
-    12, 18, 6, 11, 5, 10, 9,
-];
-
-const _DEBRUJIN_SEQ: u32 = 0x077CB531;
-
-// Find the position of the lowest set bit in a u32
-//
-// http://www.graphics.stanford.edu/~seander/bithacks.html#ZerosOnRightMultLookup
-#[inline]
-fn lowest_one_bit(x: u32) -> usize {
-    let minus_x = (0 as u32).wrapping_sub(x);
-    let idx = (x & minus_x).wrapping_mul(_DEBRUJIN_SEQ) >> 27;
-    _MULTIPLY_DEBRUJIN_POSITION[idx as usize]
-}
-
-#[cfg(test)]
-mod test_bits {
-    use super::lowest_one_bit;
-
-    #[test]
-    fn test_lowest_one_bit() {
-        assert_eq!(0, lowest_one_bit(0b0));
-        assert_eq!(0, lowest_one_bit(0b1));
-
-        assert_eq!(1, lowest_one_bit(0b010));
-        assert_eq!(1, lowest_one_bit(0b110));
-
-        assert_eq!(2, lowest_one_bit(0b0100));
-        assert_eq!(2, lowest_one_bit(0b1100));
-
-        assert_eq!(3, lowest_one_bit(0b01000));
-        assert_eq!(3, lowest_one_bit(0b11000));
-
-        assert_eq!(4, lowest_one_bit(0b010000));
-        assert_eq!(4, lowest_one_bit(0b110000));
     }
 }
