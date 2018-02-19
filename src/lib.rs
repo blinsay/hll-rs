@@ -1,14 +1,23 @@
 #![feature(pointer_methods, allocator_api)]
 
+// A toy implementation of HyperLogLog.
+//
+// This implementation in BYO Hash Function - callers should add data to the
+// multiset using the [`iter`] method. The data should already be a 64-bit value
+// drawn from a uniform distribution (or a 32-bit hash of an existing value).
 pub struct HLL {
     pub m: usize,
-    pub b: usize,
     pub register_width: usize,
+    b: usize,
     registers: Registers,
 }
 
 impl HLL {
+    // Create a new HLL with the given register width and log2m set to the
+    // given value. log2m must not be zero.
     pub fn new(log2m: usize, register_width: usize) -> HLL {
+        assert!(log2m > 0, "log2m must not be zero");
+
         let b = log2m;
         let m = 1 << b;
 
@@ -20,6 +29,8 @@ impl HLL {
         }
     }
 
+    // Add a raw value to the multiset. The value MUST have been hashed or
+    // drawn from a uniform distribution.
     pub fn add_raw(&mut self, value: u32) {
         let j = (value as usize) & (self.m - 1);
         let w = value >> self.b;
@@ -33,19 +44,19 @@ impl HLL {
         self.registers.set_max(j, p_w as u8);
     }
 
+    // Returns an estimate of the cardinality of the multiset.
     pub fn cardinality_estimate(&self) -> f64 {
-        let (estimator, zeros) = self.estimator();
-        match (estimator, zeros) {
+        match self.estimator_and_zeros() {
             (e, z) if z > 0 && e <= HLL::small_estimator_cutoff(self.m) => {
-                HLL::small_estimator(self.m, zeros)
+                HLL::small_estimator(self.m, z)
             }
             (e, _) if e > HLL::large_estimator_cutoff(self.m) => HLL::large_estimator(e),
-            _ => estimator,
+            (e, _) => e,
         }
     }
 
     #[inline]
-    fn estimator(&self) -> (f64, usize) {
+    fn estimator_and_zeros(&self) -> (f64, usize) {
         let mut sum: f64 = 0.0;
         let mut zeros: usize = 0;
 
@@ -101,7 +112,7 @@ impl HLL {
 
 impl std::fmt::Debug for HLL {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let (estimator, zeros) = self.estimator();
+        let (estimator, zeros) = self.estimator_and_zeros();
 
         writeln!(f, "m={} b={} width={}", self.m, self.b, self.register_width)?;
         writeln!(f, "zeros={}, estimator={}", zeros, estimator)
@@ -110,7 +121,7 @@ impl std::fmt::Debug for HLL {
 
 use std::heap::{Alloc, Heap, Layout};
 
-// A fixed-size array of N-bit wide registers.
+// A fixed-size array of N-bit wide registers. Used as storage for an HLL.
 struct Registers {
     ptr: *mut u8,
     width: usize,
