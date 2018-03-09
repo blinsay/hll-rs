@@ -15,7 +15,7 @@ fn main() {
     println!("n,explicit,hll,error");
 
     for i in 0..samples {
-        let e: u32 = rng.gen();
+        let e: u64 = rng.gen();
         explicit.insert(e);
         approx.add_raw(e);
 

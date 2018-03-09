@@ -4,11 +4,11 @@
 //
 // This implementation in BYO Hash Function - callers should add data to the
 // multiset using the [`iter`] method. The data should already be a 64-bit value
-// drawn from a uniform distribution (or a 32-bit hash of an existing value).
+// drawn from a uniform distribution.
 pub struct HLL {
     pub m: usize,
     pub register_width: usize,
-    b: usize,
+    b: usize, // log2m
     registers: Registers,
 }
 
@@ -31,7 +31,7 @@ impl HLL {
 
     // Add a raw value to the multiset. The value MUST have been hashed or
     // drawn from a uniform distribution.
-    pub fn add_raw(&mut self, value: u32) {
+    pub fn add_raw(&mut self, value: u64) {
         let j = (value as usize) & (self.m - 1);
         let w = value >> self.b;
         // NOTE(benl): the paper defines p(0^k) == k + 1 but 0.trailing_zeros() == 0
@@ -50,7 +50,9 @@ impl HLL {
             (e, z) if z > 0 && e <= HLL::small_estimator_cutoff(self.m) => {
                 HLL::small_estimator(self.m, z)
             }
-            (e, _) if e > HLL::large_estimator_cutoff(self.m) => HLL::large_estimator(e),
+            (e, _) if e > HLL::large_estimator_cutoff(self.register_width, self.b) => {
+                HLL::large_estimator(self.register_width, self.b, e)
+            }
             (e, _) => e,
         }
     }
@@ -99,14 +101,22 @@ impl HLL {
     // in case this implementation ever grows to include the improvements from
     // "HyperLogLog in Practice"
     #[inline]
-    fn large_estimator_cutoff(_m: usize) -> f64 {
-        (1.0 / 30.0) * ((1 as u64) << 32) as f64
+    fn large_estimator_cutoff(rw: usize, log2m: usize) -> f64 {
+        HLL::two_to_l(rw, log2m) / 30.0
     }
 
     #[inline]
-    fn large_estimator(est: f64) -> f64 {
-        let two_to_32 = ((1 as u64) << 32) as f64;
-        -1.0 * two_to_32 * (1.0 - est / two_to_32).ln()
+    fn large_estimator(rw: usize, log2m: usize, est: f64) -> f64 {
+        let ttl = HLL::two_to_l(rw, log2m);
+        -1.0 * ttl * (1.0 - est / ttl).ln()
+    }
+
+    #[inline]
+    fn two_to_l(register_width: usize, log2m: usize) -> f64 {
+        // this needs to be -2 instead of -1 to account for the fact that
+        // p_w(0) = 1 and not 0
+        let max_register_val = (1 << register_width) - 1 - 1;
+        (2.0_f64).powi((max_register_val + log2m) as i32)
     }
 }
 
