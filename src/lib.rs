@@ -44,6 +44,18 @@ impl HLL {
         self.registers.set_max(j, p_w as u8);
     }
 
+    // Union another HLL value into this one. This is equivalent to setting
+    // every register in this HLL to the max of it's current value and the
+    // corresponding register in the other HLL.
+    //
+    // Does not validate that the two HLLs are compatible, and will panic if
+    // other has a higher log2m value than self.
+    pub fn union(&mut self, other: &Self) {
+        for (i, v) in other.registers.iter().enumerate() {
+            self.registers.set_max(i, v);
+        }
+    }
+
     // Returns an estimate of the cardinality of the multiset.
     pub fn cardinality_estimate(&self) -> f64 {
         match self.estimator_and_zeros() {
@@ -354,5 +366,32 @@ mod test_registers {
         fn qc_iter_length(tc: TestCase) -> bool {
             Registers::new(tc.width, tc.len).iter().count() == tc.len
         }
+    }
+}
+
+#[cfg(test)]
+mod test_hll {
+    use super::*;
+
+    #[test]
+    fn test_union_sets_max() {
+        let mut h1 = HLL::new(2, 5);
+        h1.registers.set_max(0, 3);
+        h1.registers.set_max(1, 1);
+        h1.registers.set_max(2, 1);
+        h1.registers.set_max(3, 3);
+
+        let mut h2 = HLL::new(2, 5);
+        h2.registers.set_max(0, 2);
+        h2.registers.set_max(1, 2);
+        h2.registers.set_max(2, 2);
+        h2.registers.set_max(3, 2);
+
+        h1.union(&h2);
+        assert_eq!(
+            h1.registers.iter().collect::<Vec<u8>>(),
+            vec![3, 2, 2, 3],
+            "expected unioned registers to be the pairwise max of both HLLs"
+        );
     }
 }
