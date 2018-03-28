@@ -109,9 +109,6 @@ impl HLL {
         m * (m / zeros).ln()
     }
 
-    // NOTE(benl): this ignores its input on purpose. it's here as a placeholder
-    // in case this implementation ever grows to include the improvements from
-    // "HyperLogLog in Practice"
     #[inline]
     fn large_estimator_cutoff(rw: usize, log2m: usize) -> f64 {
         HLL::two_to_l(rw, log2m) / 30.0
