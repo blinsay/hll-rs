@@ -1,10 +1,8 @@
-#![feature(pointer_methods, allocator_api)]
-
 // A toy implementation of HyperLogLog.
 //
-// This implementation in BYO Hash Function - callers should add data to the
-// multiset using the [`iter`] method. The data should already be a 64-bit value
-// drawn from a uniform distribution.
+// This implementation is BYO Hash Function - callers should add data to the
+// HLL using the [`iter`] method. Data should already be a 64-bit value
+// drawn from a uniform distribution (read: hashed well).
 pub struct HLL {
     pub m: usize,
     pub register_width: usize,
@@ -138,7 +136,7 @@ impl std::fmt::Debug for HLL {
     }
 }
 
-use std::heap::{Alloc, Heap, Layout};
+use std::alloc::{Layout,alloc_zeroed,dealloc};
 
 // A fixed-size array of N-bit wide registers. Used as storage for an HLL.
 struct Registers {
@@ -163,11 +161,7 @@ impl Registers {
         );
 
         let ptr = unsafe {
-            // TODO(benl): is 8 byte alignment ok?
-            let layout = Registers::layout(width, len);
-            Heap::default()
-                .alloc_zeroed(layout)
-                .expect("hll: allocation failure")
+            alloc_zeroed(Registers::layout(width, len))
         };
 
         Registers {
@@ -250,9 +244,9 @@ impl Registers {
 
 impl Drop for Registers {
     fn drop(&mut self) {
+        let layout = Registers::layout(self.width, self.len);
         unsafe {
-            let layout = Registers::layout(self.width, self.len);
-            Heap::default().dealloc(self.ptr, layout);
+            dealloc(self.ptr, layout);
         }
     }
 }
