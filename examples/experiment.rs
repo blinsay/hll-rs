@@ -1,5 +1,5 @@
-extern crate hll;
-extern crate rand;
+
+use rand;
 
 use hll::HLL;
 use rand::Rng;

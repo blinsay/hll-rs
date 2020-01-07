@@ -129,7 +129,7 @@ impl HLL {
 }
 
 impl std::fmt::Debug for HLL {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (estimator, zeros) = self.estimator_and_zeros();
 
         writeln!(f, "m={} b={} width={}", self.m, self.b, self.register_width)?;
@@ -267,11 +267,7 @@ impl Iterator for RegisterIterator {
 }
 
 #[cfg(test)]
-extern crate quickcheck;
-
-#[cfg(test)]
 mod test_registers {
-    #[macro_use]
     use quickcheck::*;
     use super::*;
 
