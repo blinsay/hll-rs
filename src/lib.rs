@@ -7,9 +7,8 @@ use std::marker::PhantomData;
 // HLL using the [`iter`] method. Data should already be a 64-bit value
 // drawn from a uniform distribution (read: hashed well).
 pub struct HLL {
-    pub m: usize,
-    pub register_width: usize,
-    b: usize, // log2m
+    m: usize,
+    b: usize,
     registers: Registers,
 }
 
@@ -17,12 +16,11 @@ impl HLL {
     // Create a new HLL with the given register width and log2m set to the
     // given value. log2m must not be zero.
     pub fn new(log2m: usize, register_width: usize) -> HLL {
-        assert!(log2m > 0, "log2m must not be zero");
-
         let b = log2m;
         let m = 1 << b;
+        let registers = Registers::new(register_width, m);
 
-        HLL { m, b, register_width, registers: Registers::new(register_width, m) }
+        HLL { m, b, registers }
     }
 
     // Add a raw value to the multiset. The value MUST have been hashed or
@@ -62,8 +60,8 @@ impl HLL {
             (e, z) if z > 0 && e <= HLL::small_estimator_cutoff(self.m) => {
                 HLL::small_estimator(self.m, z)
             }
-            (e, _) if e > HLL::large_estimator_cutoff(self.register_width, self.b) => {
-                HLL::large_estimator(self.register_width, self.b, e)
+            (e, _) if e > HLL::large_estimator_cutoff(self.registers.width, self.b) => {
+                HLL::large_estimator(self.registers.width, self.b, e)
             }
             (e, _) => e,
         }
@@ -133,16 +131,39 @@ impl std::fmt::Debug for HLL {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (estimator, zeros) = self.estimator_and_zeros();
 
-        writeln!(f, "m={} b={} width={}", self.m, self.b, self.register_width)?;
-        writeln!(f, "zeros={}, estimator={}", zeros, estimator)
+        writeln!(
+            f,
+            "HLL {{ m={}, b={}, reg_width={}, zeros={}, estimator={} }}",
+            self.m, self.b, self.registers.width, zeros, estimator
+        )
+    }
+}
+
+#[cfg(test)]
+mod test_hll {
+    use super::*;
+
+    #[test]
+    fn test_union_set_max() {
+        let mut h1 = HLL { b: 2, m: 4, registers: Registers::from_iter(4, 4, vec![3, 1, 1, 3]) };
+
+        let h2 = HLL { b: 2, m: 4, registers: Registers::from_iter(4, 4, vec![2, 2, 2, 2]) };
+
+        h1.union(&h2);
+        assert_eq!(
+            h1.registers.iter().collect::<Vec<u8>>(),
+            vec![3, 2, 2, 3],
+            "expected unioned registers to be the pairwise max of both HLLs"
+        );
     }
 }
 
 // A fixed-size array of N-bit wide registers. Used as storage for an HLL.
 struct Registers {
-    ptr: *mut u8,
+    mem: *mut u8,
     width: usize,
     len: usize,
+    mask: u8,
 }
 
 impl Registers {
@@ -154,12 +175,12 @@ impl Registers {
     //
     // Registers must be between MIN_WIDTH and MAX_WIDTH bits wide.
     fn new(width: usize, len: usize) -> Registers {
-        assert!(len > 0, "invalid register len");
-        assert!(1 <= Registers::MIN_WIDTH && Registers::MAX_WIDTH <= 8, "invalid regsiter width");
+        assert!(Self::MIN_WIDTH <= width && width <= Self::MAX_WIDTH, "invalid register width",);
 
-        let ptr = unsafe { alloc_zeroed(Registers::layout(width, len)) };
+        let mask = Self::mask(width);
+        let mem = unsafe { alloc_zeroed(Registers::layout(width, len)) };
 
-        Registers { ptr, len, width }
+        Registers { mem, width, len, mask }
     }
 
     // set the value of the ith register to v iff v is greater than the existing
@@ -172,15 +193,13 @@ impl Registers {
     //
     fn set_max(&mut self, i: usize, v: u8) {
         assert!(i < self.len);
-
         unsafe {
-            let mask = Registers::mask_for(self.width);
-            let ptr = self.ptr.add(i * self.width);
+            let ptr = self.mem.add(i * self.width);
 
-            let prev = *ptr & mask;
+            let prev = *ptr & self.mask;
             if prev < v {
-                *ptr &= !mask;
-                *ptr |= v & mask;
+                *ptr &= !self.mask;
+                *ptr |= v & self.mask;
             }
         }
     }
@@ -189,37 +208,10 @@ impl Registers {
     fn iter(&self) -> RegisterIterator {
         RegisterIterator {
             _pd: PhantomData,
-            ptr: self.ptr,
+            ptr: self.mem,
             idx: 0,
             len: self.len,
             width: self.width,
-        }
-    }
-
-    // return the value of the ith register. unused except for testing.
-    #[allow(dead_code)]
-    fn get(&self, i: usize) -> u8 {
-        assert!(i < self.len);
-
-        unsafe {
-            let mask = Registers::mask_for(self.width);
-            let ptr = self.ptr.add(i * self.width);
-
-            *ptr & mask
-        }
-    }
-
-    // set the value of the ith register to v. unused except for testing.
-    #[allow(dead_code)]
-    fn set(&mut self, i: usize, v: u8) {
-        assert!(i < self.len);
-
-        unsafe {
-            let mask = Registers::mask_for(self.width);
-            let ptr = self.ptr.add(i * self.width);
-
-            *ptr &= !mask;
-            *ptr |= v & mask;
         }
     }
 
@@ -229,8 +221,50 @@ impl Registers {
     }
 
     #[inline]
-    fn mask_for(width: usize) -> u8 {
+    fn mask(width: usize) -> u8 {
         (((1 as u64) << width) - 1) as u8
+    }
+}
+
+#[cfg(test)]
+impl Registers {
+    fn from_iter<I>(width: usize, len: usize, items: I) -> Registers
+    where
+        I: IntoIterator,
+        <I as IntoIterator>::Item: Into<u8>,
+    {
+        let mut registers = Registers::new(width, len);
+
+        for (i, val) in items.into_iter().enumerate() {
+            registers.set(i, val.into());
+        }
+
+        registers
+    }
+
+    // Return the value of the ith register
+    fn get(&self, i: usize) -> u8 {
+        assert!(i < self.len);
+
+        unsafe {
+            let mask = Registers::mask(self.width);
+            let ptr = self.mem.add(i * self.width);
+
+            *ptr & mask
+        }
+    }
+
+    // Set the value of the ith register to v
+    fn set(&mut self, i: usize, v: u8) {
+        assert!(i < self.len);
+
+        unsafe {
+            let mask = Registers::mask(self.width);
+            let ptr = self.mem.add(i * self.width);
+
+            *ptr &= !mask;
+            *ptr |= v & mask;
+        }
     }
 }
 
@@ -238,7 +272,7 @@ impl Drop for Registers {
     fn drop(&mut self) {
         let layout = Registers::layout(self.width, self.len);
         unsafe {
-            dealloc(self.ptr, layout);
+            dealloc(self.mem, layout);
         }
     }
 }
@@ -262,7 +296,7 @@ impl<'a> Iterator for RegisterIterator<'a> {
             None
         } else {
             let val = unsafe {
-                let mask = Registers::mask_for(self.width);
+                let mask = Registers::mask(self.width);
                 let ptr = self.ptr.add(self.idx * self.width);
 
                 *ptr & mask
@@ -319,7 +353,7 @@ mod test_registers {
     #[quickcheck]
     fn test_set_odd(tc: TestCase) -> bool {
         let mut rs = Registers::new(tc.width, tc.len);
-        let val = 0b10101010 & Registers::mask_for(tc.width);
+        let val = 0b10101010 & Registers::mask(tc.width);
 
         for i in (0..tc.len).filter(|i| i % 2 == 0) {
             rs.set(i, val);
@@ -334,8 +368,8 @@ mod test_registers {
     #[quickcheck]
     fn test_set_max(tc: TestCase) -> bool {
         let mut rs = Registers::new(tc.width, tc.len);
-        let low_v = 0b001 & Registers::mask_for(tc.width);
-        let high_v = 0b111 & Registers::mask_for(tc.width);
+        let low_v = 0b0000 & Registers::mask(tc.width);
+        let high_v = 0b1111 & Registers::mask(tc.width);
 
         for i in 0..tc.len {
             rs.set_max(i, low_v);
@@ -344,32 +378,5 @@ mod test_registers {
         }
 
         rs.iter().all(|v| v == high_v)
-    }
-}
-
-#[cfg(test)]
-mod test_hll {
-    use super::*;
-
-    #[test]
-    fn test_union_sets_max() {
-        let mut h1 = HLL::new(2, 5);
-        h1.registers.set_max(0, 3);
-        h1.registers.set_max(1, 1);
-        h1.registers.set_max(2, 1);
-        h1.registers.set_max(3, 3);
-
-        let mut h2 = HLL::new(2, 5);
-        h2.registers.set_max(0, 2);
-        h2.registers.set_max(1, 2);
-        h2.registers.set_max(2, 2);
-        h2.registers.set_max(3, 2);
-
-        h1.union(&h2);
-        assert_eq!(
-            h1.registers.iter().collect::<Vec<u8>>(),
-            vec![3, 2, 2, 3],
-            "expected unioned registers to be the pairwise max of both HLLs"
-        );
     }
 }
