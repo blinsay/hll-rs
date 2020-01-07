@@ -1,3 +1,5 @@
+use std::alloc::{alloc_zeroed, dealloc, Layout};
+
 // A toy implementation of HyperLogLog.
 //
 // This implementation is BYO Hash Function - callers should add data to the
@@ -19,12 +21,7 @@ impl HLL {
         let b = log2m;
         let m = 1 << b;
 
-        HLL {
-            m: m,
-            b: b,
-            register_width: register_width,
-            registers: Registers::new(register_width, m),
-        }
+        HLL { m, b, register_width, registers: Registers::new(register_width, m) }
     }
 
     // Add a raw value to the multiset. The value MUST have been hashed or
@@ -32,13 +29,17 @@ impl HLL {
     pub fn add_raw(&mut self, value: u64) {
         let j = (value as usize) & (self.m - 1);
         let w = value >> self.b;
-        // NOTE(benl): the paper defines p(0^k) == k + 1 but 0.trailing_zeros() == 0
+
+        // NOTE: the paper defines p(0^k) == k + 1 but 0.trailing_zeros() == 0
         // so we have to correct here
-        let p_w = 1 + if value == 0 {
-            (32 - self.b) + 1
-        } else {
-            w.trailing_zeros() as usize
+        let p_w = 1 + {
+            if value == 0 {
+                (32 - self.b) + 1
+            } else {
+                w.trailing_zeros() as usize
+            }
         };
+
         self.registers.set_max(j, p_w as u8);
     }
 
@@ -136,8 +137,6 @@ impl std::fmt::Debug for HLL {
     }
 }
 
-use std::alloc::{Layout,alloc_zeroed,dealloc};
-
 // A fixed-size array of N-bit wide registers. Used as storage for an HLL.
 struct Registers {
     ptr: *mut u8,
@@ -155,20 +154,11 @@ impl Registers {
     // Registers must be between MIN_WIDTH and MAX_WIDTH bits wide.
     fn new(width: usize, len: usize) -> Registers {
         assert!(len > 0, "invalid register len");
-        assert!(
-            1 <= Registers::MIN_WIDTH && Registers::MAX_WIDTH <= 8,
-            "invalid regsiter width"
-        );
+        assert!(1 <= Registers::MIN_WIDTH && Registers::MAX_WIDTH <= 8, "invalid regsiter width");
 
-        let ptr = unsafe {
-            alloc_zeroed(Registers::layout(width, len))
-        };
+        let ptr = unsafe { alloc_zeroed(Registers::layout(width, len)) };
 
-        Registers {
-            ptr: ptr,
-            len: len,
-            width: width,
-        }
+        Registers { ptr, len, width }
     }
 
     // set the value of the ith register to v iff v is greater than the existing
@@ -196,12 +186,7 @@ impl Registers {
 
     // Returns an iterator over the current values of every register.
     fn iter(&self) -> RegisterIterator {
-        RegisterIterator {
-            ptr: self.ptr,
-            idx: 0,
-            len: self.len,
-            width: self.width,
-        }
+        RegisterIterator { ptr: self.ptr, idx: 0, len: self.len, width: self.width }
     }
 
     // return the value of the ith register. unused except for testing.
@@ -282,13 +267,13 @@ impl Iterator for RegisterIterator {
 }
 
 #[cfg(test)]
-#[macro_use]
 extern crate quickcheck;
 
 #[cfg(test)]
 mod test_registers {
-    use super::*;
+    #[macro_use]
     use quickcheck::*;
+    use super::*;
 
     #[derive(Debug, Clone)]
     struct TestCase {
@@ -301,25 +286,19 @@ mod test_registers {
             let reg_width = g.gen_range(Registers::MIN_WIDTH, Registers::MAX_WIDTH + 1);
             let len = g.size();
 
-            TestCase {
-                width: reg_width,
-                len: len,
-            }
+            TestCase { width: reg_width, len }
         }
 
-        fn shrink(&self) -> Box<Iterator<Item = Self>> {
+        fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
             if self.len <= 2 {
                 empty_shrinker()
             } else {
-                single_shrinker(TestCase {
-                    width: self.width,
-                    len: self.len / 2,
-                })
+                single_shrinker(TestCase { width: self.width, len: self.len / 2 })
             }
         }
     }
 
-    quickcheck!{
+    quickcheck! {
         fn qc_init_zero(tc: TestCase) -> bool {
             let rs = Registers::new(tc.width, tc.len);
 
