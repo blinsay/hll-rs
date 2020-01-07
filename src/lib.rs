@@ -268,8 +268,10 @@ impl Iterator for RegisterIterator {
 
 #[cfg(test)]
 mod test_registers {
-    use quickcheck::*;
     use super::*;
+    use quickcheck::{self, empty_shrinker, single_shrinker, Arbitrary, Gen};
+    use quickcheck_macros::quickcheck;
+    use rand::Rng;
 
     #[derive(Debug, Clone)]
     struct TestCase {
@@ -279,10 +281,10 @@ mod test_registers {
 
     impl Arbitrary for TestCase {
         fn arbitrary<G: Gen>(g: &mut G) -> TestCase {
-            let reg_width = g.gen_range(Registers::MIN_WIDTH, Registers::MAX_WIDTH + 1);
-            let len = g.size();
-
-            TestCase { width: reg_width, len }
+            TestCase {
+                width: g.gen_range(Registers::MIN_WIDTH, Registers::MAX_WIDTH),
+                len: g.size(),
+            }
         }
 
         fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
@@ -294,44 +296,46 @@ mod test_registers {
         }
     }
 
-    quickcheck! {
-        fn qc_init_zero(tc: TestCase) -> bool {
-            let rs = Registers::new(tc.width, tc.len);
+    #[quickcheck]
+    fn test_init_zeroed(tc: TestCase) -> bool {
+        let rs = Registers::new(tc.width, tc.len);
 
-            (0..tc.len).map(|i| rs.get(i)).all(|v| v == 0)
+        (0..tc.len).map(|i| rs.get(i)).all(|v| v == 0)
+    }
+
+    #[quickcheck]
+    fn test_iter_length(tc: TestCase) -> bool {
+        Registers::new(tc.width, tc.len).iter().count() == tc.len
+    }
+
+    #[quickcheck]
+    fn test_set_odd(tc: TestCase) -> bool {
+        let mut rs = Registers::new(tc.width, tc.len);
+        let val = 0b10101010 & Registers::mask_for(tc.width);
+
+        for i in (0..tc.len).filter(|i| i % 2 == 0) {
+            rs.set(i, val);
         }
 
-        fn qc_set_odd(tc: TestCase) -> bool {
-            let mut rs = Registers::new(tc.width, tc.len);
-            let val = 0b10101010 & Registers::mask_for(tc.width);
+        let all_odds_zero = rs.iter().enumerate().filter(|&(i, _)| i % 2 == 1).all(|(_, v)| v == 0);
+        let all_evens_v = rs.iter().enumerate().filter(|&(i, _)| i % 2 == 0).all(|(_, v)| v == val);
 
-            for i in (0..tc.len).filter(|i| i % 2 == 0) {
-                rs.set(i, val);
-            }
+        all_odds_zero && all_evens_v
+    }
 
-            let all_odds_zero = rs.iter().enumerate().filter(|&(i, _)| i % 2 == 1).all(|(_, v)| v == 0);
-            let all_evens_v = rs.iter().enumerate().filter(|&(i, _)| i % 2 == 0).all(|(_, v)| v == val);
+    #[quickcheck]
+    fn test_set_max(tc: TestCase) -> bool {
+        let mut rs = Registers::new(tc.width, tc.len);
+        let low_v = 0b001 & Registers::mask_for(tc.width);
+        let high_v = 0b111 & Registers::mask_for(tc.width);
 
-            all_odds_zero && all_evens_v
+        for i in 0..tc.len {
+            rs.set_max(i, low_v);
+            rs.set_max(i, high_v);
+            rs.set_max(i, low_v);
         }
 
-        fn qc_set_max(tc: TestCase) -> bool {
-            let mut rs = Registers::new(tc.width, tc.len);
-            let low_v = 0b001 & Registers::mask_for(tc.width);
-            let high_v = 0b111 & Registers::mask_for(tc.width);
-
-            for i in 0..tc.len {
-                rs.set_max(i, low_v);
-                rs.set_max(i, high_v);
-                rs.set_max(i, low_v);
-            }
-
-            rs.iter().all(|v| v == high_v)
-        }
-
-        fn qc_iter_length(tc: TestCase) -> bool {
-            Registers::new(tc.width, tc.len).iter().count() == tc.len
-        }
+        rs.iter().all(|v| v == high_v)
     }
 }
 
