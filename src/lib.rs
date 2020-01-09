@@ -1,4 +1,5 @@
 use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::marker::PhantomData;
 
 // A toy implementation of HyperLogLog.
 //
@@ -186,7 +187,13 @@ impl Registers {
 
     // Returns an iterator over the current values of every register.
     fn iter(&self) -> RegisterIterator {
-        RegisterIterator { ptr: self.ptr, idx: 0, len: self.len, width: self.width }
+        RegisterIterator {
+            _pd: PhantomData,
+            ptr: self.ptr,
+            idx: 0,
+            len: self.len,
+            width: self.width,
+        }
     }
 
     // return the value of the ith register. unused except for testing.
@@ -239,14 +246,15 @@ impl Drop for Registers {
 // An iterator that yields the current value of dense HLL registers. This
 // `struct` is created by the [`iter`] method on [`Registers`]. See its
 // documentation for more details.
-struct RegisterIterator {
+struct RegisterIterator<'a> {
+    _pd: PhantomData<&'a Registers>,
     ptr: *mut u8,
     width: usize,
     idx: usize,
     len: usize,
 }
 
-impl Iterator for RegisterIterator {
+impl<'a> Iterator for RegisterIterator<'a> {
     type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
