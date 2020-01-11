@@ -14,7 +14,7 @@ fn main() {
 
     let mut rng = rand::thread_rng();
     let mut explicit = HashSet::new();
-    let mut approx = HLL::new(16, 5);
+    let mut approx = HLL::new(16, 5).unwrap();
 
     // print a header before starting
     println!("iterations,exact_cardinality,hll_cardinality,measurement_error");
@@ -35,7 +35,7 @@ struct Observation(usize, usize, f64, f64);
 
 fn observe<T: Hash + Eq>(n: usize, explicit: &HashSet<T>, hll: &HLL) -> Observation {
     let exact = explicit.len();
-    let approximate = hll.cardinality_estimate();
+    let approximate = hll.cardinality();
     Observation(
         n,
         exact,

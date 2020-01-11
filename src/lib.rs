@@ -1,6 +1,32 @@
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::marker::PhantomData;
 
+// TODO: impl Clone for Registers and HLL
+// TODO: docs
+// TODO: serialization
+
+// It would be awesome to provide no_std support. Math isn't stable in core
+// and the intrinsics required for ln and powi are nightly only.
+//
+// https://github.com/rust-lang/rfcs/issues/2505
+
+#[derive(Debug)]
+pub enum Error {
+    AllocError,
+    InvalidRegisterWidth,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::AllocError => write!(f, "allocation failed"),
+            Error::InvalidRegisterWidth => {
+                write!(f, "invalid register width: registers must be between 1 and 8 bits wide")
+            }
+        }
+    }
+}
+
 // A toy implementation of HyperLogLog.
 //
 // This implementation is BYO Hash Function - callers should add data to the
@@ -15,12 +41,24 @@ pub struct HLL {
 impl HLL {
     // Create a new HLL with the given register width and log2m set to the
     // given value. log2m must not be zero.
-    pub fn new(log2m: usize, register_width: usize) -> HLL {
+    pub fn new(log2m: usize, register_width: usize) -> Result<HLL, Error> {
         let b = log2m;
         let m = 1 << b;
-        let registers = Registers::new(register_width, m);
+        let registers = Registers::alloc(register_width, m)?;
 
-        HLL { m, b, registers }
+        Ok(HLL { m, b, registers })
+    }
+
+    // The number of registers used in this HLL.
+    #[inline]
+    pub fn m(&self) -> usize {
+        self.m
+    }
+
+    // The width of the registers in this HLL.
+    #[inline]
+    pub fn register_width(&self) -> usize {
+        self.registers.width
     }
 
     // Add a raw value to the multiset. The value MUST have been hashed or
@@ -42,20 +80,8 @@ impl HLL {
         self.registers.set_max(j, p_w as u8);
     }
 
-    // Union another HLL value into this one. This is equivalent to setting
-    // every register in this HLL to the max of it's current value and the
-    // corresponding register in the other HLL.
-    //
-    // Does not validate that the two HLLs are compatible, and will panic if
-    // other has a higher log2m value than self.
-    pub fn union(&mut self, other: &Self) {
-        for (i, v) in other.registers.iter().enumerate() {
-            self.registers.set_max(i, v);
-        }
-    }
-
     // Returns an estimate of the cardinality of the multiset.
-    pub fn cardinality_estimate(&self) -> f64 {
+    pub fn cardinality(&self) -> f64 {
         match self.estimator_and_zeros() {
             (e, z) if z > 0 && e <= HLL::small_estimator_cutoff(self.m) => {
                 HLL::small_estimator(self.m, z)
@@ -66,6 +92,25 @@ impl HLL {
             (e, _) => e,
         }
     }
+
+    // Union another HLL value into this one. This is equivalent to setting
+    // every register in this HLL to the max of it's current value and the
+    // corresponding register in the other HLL.
+    //
+    // Does not validate that the two HLLs are compatible, and will panic if
+    // other has a higher log2m value than self.
+    pub fn union(&mut self, other: &Self) -> Result<(), ()> {
+        if self.b != other.b || self.registers.width != other.registers.width {
+            return Err(());
+        }
+
+        for (i, v) in other.registers.iter().enumerate() {
+            self.registers.set_max(i, v);
+        }
+
+        Ok(())
+    }
+
 
     #[inline]
     fn estimator_and_zeros(&self) -> (f64, usize) {
@@ -139,26 +184,44 @@ impl std::fmt::Debug for HLL {
     }
 }
 
+// TODO: prop tests for unions
+//
+// TODO: prop tests for cardinality estimates. these are hard because they can
+//       flake, and that's part of the error guarantee. the error bounds are
+//       probabilistic!
+
 #[cfg(test)]
 mod test_hll {
     use super::*;
 
+    // TODO: replace with a property test
     #[test]
     fn test_union_set_max() {
         let mut h1 = HLL { b: 2, m: 4, registers: Registers::from_iter(4, 4, vec![3, 1, 1, 3]) };
 
         let h2 = HLL { b: 2, m: 4, registers: Registers::from_iter(4, 4, vec![2, 2, 2, 2]) };
 
-        h1.union(&h2);
+        h1.union(&h2).expect("union should be ok");
         assert_eq!(
             h1.registers.iter().collect::<Vec<u8>>(),
             vec![3, 2, 2, 3],
-            "expected unioned registers to be the pairwise max of both HLLs"
+            "unioned registers should be the pairwise max of registers in both HLLs"
         );
+    }
+
+    #[test]
+    fn test_union_incompatible() {
+        let mut h1 = HLL::new(4, 5).unwrap();
+        let mut h2 = HLL::new(6, 7).unwrap();
+
+        assert_eq!(Err(()), h1.union(&h2),);
+        assert_eq!(Err(()), h2.union(&h1),);
     }
 }
 
-// A fixed-size array of N-bit wide registers. Used as storage for an HLL.
+// A fixed-size array of n-bit-wide registers
+//
+// Registers and RegisterIters are unsafe and reference raw
 struct Registers {
     mem: *mut u8,
     width: usize,
@@ -170,29 +233,24 @@ impl Registers {
     const MIN_WIDTH: usize = 1;
     const MAX_WIDTH: usize = 8;
 
-    // Allocate a new set of len registers of the given width. The length
-    // of the registers will never change.
-    //
-    // Registers must be between MIN_WIDTH and MAX_WIDTH bits wide.
-    fn new(width: usize, len: usize) -> Registers {
-        assert!(Self::MIN_WIDTH <= width && width <= Self::MAX_WIDTH, "invalid register width",);
-
+    fn alloc(width: usize, len: usize) -> Result<Registers, Error> {
+        if !(Self::MIN_WIDTH..=Self::MAX_WIDTH).contains(&width) {
+            return Err(Error::InvalidRegisterWidth);
+        }
         let mask = Self::mask(width);
-        let mem = unsafe { alloc_zeroed(Registers::layout(width, len)) };
 
-        Registers { mem, width, len, mask }
+        let mem = unsafe { alloc_zeroed(Registers::layout(width, len)) };
+        if mem.is_null() {
+            return Err(Error::AllocError);
+        }
+
+        Ok(Registers { mem, width, len, mask })
     }
 
     // set the value of the ith register to v iff v is greater than the existing
-    // value. this is equivalent to the following snippet but uses fewer
-    // instructions.
-    //
-    //      if rs.get(i) > v {
-    //          rs.set(i, v)
-    //      }
-    //
+    // value. this is equivalent to if self.get(i) > v { self.set(i, v) } but should
+    // use fewer instructions
     fn set_max(&mut self, i: usize, v: u8) {
-        assert!(i < self.len);
         unsafe {
             let ptr = self.mem.add(i * self.width);
 
@@ -233,7 +291,7 @@ impl Registers {
         I: IntoIterator,
         <I as IntoIterator>::Item: Into<u8>,
     {
-        let mut registers = Registers::new(width, len);
+        let mut registers = Registers::alloc(width, len).unwrap();
 
         for (i, val) in items.into_iter().enumerate() {
             registers.set(i, val.into());
@@ -340,19 +398,19 @@ mod test_registers {
 
     #[quickcheck]
     fn test_init_zeroed(tc: TestCase) -> bool {
-        let rs = Registers::new(tc.width, tc.len);
+        let rs = Registers::alloc(tc.width, tc.len).unwrap();
 
         (0..tc.len).map(|i| rs.get(i)).all(|v| v == 0)
     }
 
     #[quickcheck]
     fn test_iter_length(tc: TestCase) -> bool {
-        Registers::new(tc.width, tc.len).iter().count() == tc.len
+        Registers::alloc(tc.width, tc.len).unwrap().iter().count() == tc.len
     }
 
     #[quickcheck]
     fn test_set_odd(tc: TestCase) -> bool {
-        let mut rs = Registers::new(tc.width, tc.len);
+        let mut rs = Registers::alloc(tc.width, tc.len).unwrap();
         let val = 0b10101010 & Registers::mask(tc.width);
 
         for i in (0..tc.len).filter(|i| i % 2 == 0) {
@@ -367,7 +425,7 @@ mod test_registers {
 
     #[quickcheck]
     fn test_set_max(tc: TestCase) -> bool {
-        let mut rs = Registers::new(tc.width, tc.len);
+        let mut rs = Registers::alloc(tc.width, tc.len).unwrap();
         let low_v = 0b0000 & Registers::mask(tc.width);
         let high_v = 0b1111 & Registers::mask(tc.width);
 
