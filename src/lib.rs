@@ -1,5 +1,4 @@
 use std::alloc::{alloc_zeroed, dealloc, Layout};
-use std::marker::PhantomData;
 
 // TODO: impl Clone for Registers and HLL
 // TODO: docs
@@ -111,7 +110,6 @@ impl HLL {
         Ok(())
     }
 
-
     #[inline]
     fn estimator_and_zeros(&self) -> (f64, usize) {
         let mut sum: f64 = 0.0;
@@ -194,11 +192,9 @@ impl std::fmt::Debug for HLL {
 mod test_hll {
     use super::*;
 
-    // TODO: replace with a property test
     #[test]
     fn test_union_set_max() {
         let mut h1 = HLL { b: 2, m: 4, registers: Registers::from_iter(4, 4, vec![3, 1, 1, 3]) };
-
         let h2 = HLL { b: 2, m: 4, registers: Registers::from_iter(4, 4, vec![2, 2, 2, 2]) };
 
         h1.union(&h2).expect("union should be ok");
@@ -247,35 +243,55 @@ impl Registers {
         Ok(Registers { mem, width, len, mask })
     }
 
-    // set the value of the ith register to v iff v is greater than the existing
-    // value. this is equivalent to if self.get(i) > v { self.set(i, v) } but should
-    // use fewer instructions
+    // TODO: bench this vs `if get(i) < v { set(i, v) }`
     fn set_max(&mut self, i: usize, v: u8) {
-        unsafe {
-            let ptr = self.mem.add(i * self.width);
+        let v = v & self.mask;
+        let bits = self.width * i;
+        let low_idx = bits / 8;
+        let high_idx = (bits + self.width - 1) / 8;
+        let remainder = bits % 8;
 
-            let prev = *ptr & self.mask;
-            if prev < v {
-                *ptr &= !self.mask;
-                *ptr |= v & self.mask;
+        let low_byte = unsafe { *self.mem.add(low_idx) };
+        let high_byte = unsafe { *self.mem.add(high_idx) };
+
+        let current_v = ((low_byte >> remainder)
+            | high_byte.checked_shl(8 - remainder as u32).unwrap_or(0))
+            & self.mask;
+
+        if current_v < v {
+            unsafe {
+                *self.mem.add(low_idx) &= !(self.mask << remainder);
+                *self.mem.add(low_idx) |= v << remainder;
+
+                *self.mem.add(high_idx) &=
+                    !(self.mask.checked_shr(8 - remainder as u32).unwrap_or(0));
+                *self.mem.add(high_idx) |= v.checked_shr(8 - remainder as u32).unwrap_or(0);
             }
         }
     }
 
-    // Returns an iterator over the current values of every register.
+    fn get(&self, i: usize) -> u8 {
+        let bits = self.width * i;
+        let low_idx = bits / 8;
+        let high_idx = (bits + self.width - 1) / 8;
+        let remainder = bits % 8;
+
+        let low_byte = unsafe { *self.mem.add(low_idx) };
+        let high_byte = unsafe { *self.mem.add(high_idx) };
+
+        ((low_byte >> remainder) | high_byte.checked_shl(8 - remainder as u32).unwrap_or(0))
+            & self.mask
+    }
+
     fn iter(&self) -> RegisterIterator {
-        RegisterIterator {
-            _pd: PhantomData,
-            ptr: self.mem,
-            idx: 0,
-            len: self.len,
-            width: self.width,
-        }
+        RegisterIterator { registers: self, idx: 0 }
     }
 
     #[inline]
     fn layout(width: usize, len: usize) -> Layout {
-        Layout::from_size_align(width * len, 8).expect("invalid register layout")
+        let total_bits = width * len;
+        let bytes = (total_bits / 8) + if (total_bits % 8) == 0 { 0 } else { 1 };
+        Layout::from_size_align(bytes, 1).expect("invalid register layout")
     }
 
     #[inline]
@@ -300,28 +316,19 @@ impl Registers {
         registers
     }
 
-    // Return the value of the ith register
-    fn get(&self, i: usize) -> u8 {
-        assert!(i < self.len);
-
-        unsafe {
-            let mask = Registers::mask(self.width);
-            let ptr = self.mem.add(i * self.width);
-
-            *ptr & mask
-        }
-    }
-
-    // Set the value of the ith register to v
     fn set(&mut self, i: usize, v: u8) {
-        assert!(i < self.len);
+        let v = v & self.mask;
+        let bits = self.width * i;
+        let low_idx = bits / 8;
+        let high_idx = (bits + self.width - 1) / 8;
+        let remainder = bits % 8;
 
         unsafe {
-            let mask = Registers::mask(self.width);
-            let ptr = self.mem.add(i * self.width);
+            *self.mem.add(low_idx) &= !(self.mask << remainder);
+            *self.mem.add(low_idx) |= v << remainder;
 
-            *ptr &= !mask;
-            *ptr |= v & mask;
+            *self.mem.add(high_idx) &= !(self.mask.checked_shr(8 - remainder as u32).unwrap_or(0));
+            *self.mem.add(high_idx) |= v.checked_shr(8 - remainder as u32).unwrap_or(0);
         }
     }
 }
@@ -339,29 +346,20 @@ impl Drop for Registers {
 // `struct` is created by the [`iter`] method on [`Registers`]. See its
 // documentation for more details.
 struct RegisterIterator<'a> {
-    _pd: PhantomData<&'a Registers>,
-    ptr: *mut u8,
-    width: usize,
+    registers: &'a Registers,
     idx: usize,
-    len: usize,
 }
 
 impl<'a> Iterator for RegisterIterator<'a> {
     type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.idx >= self.len {
+        if self.idx >= self.registers.len {
             None
         } else {
-            let val = unsafe {
-                let mask = Registers::mask(self.width);
-                let ptr = self.ptr.add(self.idx * self.width);
-
-                *ptr & mask
-            };
-
+            let v = self.registers.get(self.idx);
             self.idx += 1;
-            Some(val)
+            Some(v)
         }
     }
 }
@@ -373,15 +371,21 @@ mod test_registers {
     use quickcheck_macros::quickcheck;
     use rand::Rng;
 
-    #[derive(Debug, Clone)]
-    struct TestCase {
+    #[derive(Debug, Clone, Copy)]
+    struct RegisterSize {
         width: usize,
         len: usize,
     }
 
-    impl Arbitrary for TestCase {
-        fn arbitrary<G: Gen>(g: &mut G) -> TestCase {
-            TestCase {
+    impl RegisterSize {
+        fn registers(self) -> Result<Registers, Error> {
+            Registers::alloc(self.width, self.len)
+        }
+    }
+
+    impl Arbitrary for RegisterSize {
+        fn arbitrary<G: Gen>(g: &mut G) -> RegisterSize {
+            RegisterSize {
                 width: g.gen_range(Registers::MIN_WIDTH, Registers::MAX_WIDTH),
                 len: g.size(),
             }
@@ -391,29 +395,94 @@ mod test_registers {
             if self.len <= 2 {
                 empty_shrinker()
             } else {
-                single_shrinker(TestCase { width: self.width, len: self.len / 2 })
+                single_shrinker(RegisterSize { width: self.width, len: self.len / 2 })
             }
         }
     }
 
-    #[quickcheck]
-    fn test_init_zeroed(tc: TestCase) -> bool {
-        let rs = Registers::alloc(tc.width, tc.len).unwrap();
+    #[test]
+    fn test_set_get() {
+        let tcs = vec![
+            // inside one byte
+            (0, 4, 0b0000000000000100, vec![4, 0, 0, 0]),
+            (0, 31, 0b0000000000011111, vec![31, 0, 0, 0]),
+            // spans two bytes
+            (1, 4, 0b0000000010000000, vec![0, 4, 0, 0]),
+            (1, 31, 0b0000001111100000, vec![0, 31, 0, 0]),
+        ];
 
-        (0..tc.len).map(|i| rs.get(i)).all(|v| v == 0)
+        for (idx, val, expected_bits, expected_registers) in tcs {
+            let mut rs = RegisterSize { len: 4, width: 5 }.registers().unwrap();
+            rs.set(idx, val);
+
+            let bits = {
+                let b1 = unsafe { *rs.mem } as u16;
+                let b2 = unsafe { *rs.mem.add(1) } as u16;
+                (b2 << 8) | b1
+            };
+
+            assert_eq!(
+                expected_bits, bits,
+                "i={}, v={}: expected bits: {:016b}, actual bits: {:016b}",
+                idx, val, expected_bits, bits
+            );
+
+            let registers = rs.iter().collect::<Vec<u8>>();
+            assert_eq!(
+                expected_registers, registers,
+                "i={}, v={}: expected registers don't match",
+                idx, val
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_max() {
+        let mut rs = RegisterSize { len: 4, width: 5 }.registers().unwrap();
+
+        println!("{:?}", rs.iter().collect::<Vec<u8>>());
+        for (idx, val) in vec![(1, 1), (1, 3), (1, 2)] {
+            rs.set(idx, val);
+            println!("{:?}", rs.iter().collect::<Vec<u8>>());
+        }
+        assert_eq!(rs.iter().collect::<Vec<u8>>(), vec![0, 2, 0, 0]);
+
+        // for (idx, val) in vec![(0, 3), (0, 1)] {
+        //     rs.set_max(idx, val);
+        // }
+        // assert_eq!(rs.iter().collect::<Vec<u8>>(), vec![3, 3, 0, 0]);
     }
 
     #[quickcheck]
-    fn test_iter_length(tc: TestCase) -> bool {
-        Registers::alloc(tc.width, tc.len).unwrap().iter().count() == tc.len
+    fn check_layout(rs: RegisterSize) -> bool {
+        let layout = Registers::layout(rs.width, rs.len);
+
+        let total_bits = rs.width * rs.len;
+        let whole_bytes = total_bits / 8;
+        let partial_bytes = if total_bits - (whole_bytes * 8) > 0 { 1 } else { 0 };
+        let bytes = whole_bytes + partial_bytes;
+
+        layout.size() == bytes
     }
 
     #[quickcheck]
-    fn test_set_odd(tc: TestCase) -> bool {
-        let mut rs = Registers::alloc(tc.width, tc.len).unwrap();
-        let val = 0b10101010 & Registers::mask(tc.width);
+    fn check_init_zeroed(rs: RegisterSize) -> bool {
+        let rs = rs.registers().unwrap();
 
-        for i in (0..tc.len).filter(|i| i % 2 == 0) {
+        (0..rs.len).map(|i| rs.get(i)).all(|v| v == 0)
+    }
+
+    #[quickcheck]
+    fn check_iter_length(rs: RegisterSize) -> bool {
+        rs.registers().unwrap().iter().count() == rs.len
+    }
+
+    #[quickcheck]
+    fn check_set_odd_even(rs: RegisterSize) -> bool {
+        let mut rs = rs.registers().unwrap();
+        let val = 0b10101010 & Registers::mask(rs.width);
+
+        for i in (0..rs.len).filter(|i| i % 2 == 0) {
             rs.set(i, val);
         }
 
@@ -424,12 +493,12 @@ mod test_registers {
     }
 
     #[quickcheck]
-    fn test_set_max(tc: TestCase) -> bool {
-        let mut rs = Registers::alloc(tc.width, tc.len).unwrap();
-        let low_v = 0b0000 & Registers::mask(tc.width);
-        let high_v = 0b1111 & Registers::mask(tc.width);
+    fn check_set_max(rs: RegisterSize) -> bool {
+        let mut rs = rs.registers().unwrap();
+        let low_v = 1;
+        let high_v = (1 << rs.width) - 1;
 
-        for i in 0..tc.len {
+        for i in 0..rs.len {
             rs.set_max(i, low_v);
             rs.set_max(i, high_v);
             rs.set_max(i, low_v);
