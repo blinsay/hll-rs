@@ -1,6 +1,5 @@
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout};
 
-// TODO: impl Clone for Registers and HLL
 // TODO: docs
 // TODO: serialization
 
@@ -9,68 +8,53 @@ use std::alloc::{alloc_zeroed, dealloc, Layout};
 //
 // https://github.com/rust-lang/rfcs/issues/2505
 
-#[derive(Debug)]
-pub enum Error {
-    AllocError,
-    InvalidRegisterWidth,
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::AllocError => write!(f, "allocation failed"),
-            Error::InvalidRegisterWidth => {
-                write!(f, "invalid register width: registers must be between 1 and 8 bits wide")
-            }
-        }
-    }
-}
-
 // A toy implementation of HyperLogLog.
 //
 // This implementation is BYO Hash Function - callers should add data to the
 // HLL using the [`iter`] method. Data should already be a 64-bit value
 // drawn from a uniform distribution (read: hashed well).
-pub struct HLL {
-    m: usize,
-    b: usize,
-    registers: Registers,
+#[allow(clippy::upper_case_acronyms)]
+pub struct HLL<const W: usize, const B: usize> {
+    registers: Registers<W>,
 }
 
-impl HLL {
+impl<const W: usize, const B: usize> HLL<W, B> {
     // Create a new HLL with the given register width and log2m set to the
     // given value. log2m must not be zero.
-    pub fn new(log2m: usize, register_width: usize) -> Result<HLL, Error> {
-        let b = log2m;
-        let m = 1 << b;
-        let registers = Registers::alloc(register_width, m)?;
-
-        Ok(HLL { m, b, registers })
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> HLL<W, B> {
+        let registers = Registers::alloc(Self::m());
+        HLL { registers }
     }
 
     // The number of registers used in this HLL.
     #[inline]
-    pub fn m(&self) -> usize {
-        self.m
+    pub const fn m() -> usize {
+        1 << B
     }
 
     // The width of the registers in this HLL.
     #[inline]
-    pub fn register_width(&self) -> usize {
-        self.registers.width
+    pub const fn register_width(&self) -> usize {
+        W
+    }
+
+    #[inline]
+    pub const fn register_count(&self) -> usize {
+        Self::m()
     }
 
     // Add a raw value to the multiset. The value MUST have been hashed or
     // drawn from a uniform distribution.
     pub fn add_raw(&mut self, value: u64) {
-        let j = (value as usize) & (self.m - 1);
-        let w = value >> self.b;
+        let j = (value as usize) & (Self::m() - 1);
+        let w = value >> B;
 
         // NOTE: the paper defines p(0^k) == k + 1 but 0.trailing_zeros() == 0
         // so we have to correct here
         let p_w = 1 + {
             if value == 0 {
-                (32 - self.b) + 1
+                (32 - B) + 1
             } else {
                 w.trailing_zeros() as usize
             }
@@ -82,12 +66,8 @@ impl HLL {
     // Returns an estimate of the cardinality of the multiset.
     pub fn cardinality(&self) -> f64 {
         match self.estimator_and_zeros() {
-            (e, z) if z > 0 && e <= HLL::small_estimator_cutoff(self.m) => {
-                HLL::small_estimator(self.m, z)
-            }
-            (e, _) if e > HLL::large_estimator_cutoff(self.registers.width, self.b) => {
-                HLL::large_estimator(self.registers.width, self.b, e)
-            }
+            (e, z) if z > 0 && e <= Self::small_estimator_cutoff() => Self::small_estimator(z),
+            (e, _) if e > Self::large_estimator_cutoff() => Self::large_estimator(e),
             (e, _) => e,
         }
     }
@@ -98,16 +78,10 @@ impl HLL {
     //
     // Does not validate that the two HLLs are compatible, and will panic if
     // other has a higher log2m value than self.
-    pub fn union(&mut self, other: &Self) -> Result<(), ()> {
-        if self.b != other.b || self.registers.width != other.registers.width {
-            return Err(());
-        }
-
+    pub fn union(&mut self, other: &Self) {
         for (i, v) in other.registers.iter().enumerate() {
             self.registers.set_max(i, v);
         }
-
-        Ok(())
     }
 
     #[inline]
@@ -122,13 +96,13 @@ impl HLL {
             }
         }
 
-        (HLL::alpha_m_squared(self.m) / sum, zeros)
+        (Self::alpha_m_squared() / sum, zeros)
     }
 
     #[inline]
-    fn alpha_m_squared(m: usize) -> f64 {
-        let mf = m as f64;
-        let alpha = match m {
+    fn alpha_m_squared() -> f64 {
+        let mf = Self::m() as f64;
+        let alpha = match Self::m() {
             16 => 0.673,
             32 => 0.697,
             64 => 0.709,
@@ -138,46 +112,49 @@ impl HLL {
     }
 
     #[inline]
-    fn small_estimator_cutoff(m: usize) -> f64 {
-        let m = m as f64;
-        (5.0 / 2.0) * m
+    fn small_estimator_cutoff() -> f64 {
+        (5.0 / 2.0) * (Self::m() as f64)
     }
 
     #[inline]
-    fn small_estimator(m: usize, zeros: usize) -> f64 {
-        let m = m as f64;
+    fn small_estimator(zeros: usize) -> f64 {
+        let m = Self::m() as f64;
         let zeros = zeros as f64;
         m * (m / zeros).ln()
     }
 
     #[inline]
-    fn large_estimator_cutoff(rw: usize, log2m: usize) -> f64 {
-        HLL::two_to_l(rw, log2m) / 30.0
+    fn large_estimator_cutoff() -> f64 {
+        Self::two_to_l(B) / 30.0
     }
 
     #[inline]
-    fn large_estimator(rw: usize, log2m: usize, est: f64) -> f64 {
-        let ttl = HLL::two_to_l(rw, log2m);
+    fn large_estimator(est: f64) -> f64 {
+        let ttl = Self::two_to_l(B);
         -1.0 * ttl * (1.0 - est / ttl).ln()
     }
 
     #[inline]
-    fn two_to_l(register_width: usize, log2m: usize) -> f64 {
+    fn two_to_l(log2m: usize) -> f64 {
         // this needs to be -2 instead of -1 to account for the fact that
         // p_w(0) = 1 and not 0
-        let max_register_val = (1 << register_width) - 1 - 1;
+        let max_register_val = (1 << W) - 1 - 1;
         (2.0_f64).powi((max_register_val + log2m) as i32)
     }
 }
 
-impl std::fmt::Debug for HLL {
+impl<const W: usize, const B: usize> std::fmt::Debug for HLL<W, B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (estimator, zeros) = self.estimator_and_zeros();
 
         writeln!(
             f,
             "HLL {{ m={}, b={}, reg_width={}, zeros={}, estimator={} }}",
-            self.m, self.b, self.registers.width, zeros, estimator
+            Self::m(),
+            B,
+            W,
+            zeros,
+            estimator
         )
     }
 }
@@ -194,10 +171,10 @@ mod test_hll {
 
     #[test]
     fn test_union_set_max() {
-        let mut h1 = HLL { b: 2, m: 4, registers: Registers::from_iter(4, 4, vec![3, 1, 1, 3]) };
-        let h2 = HLL { b: 2, m: 4, registers: Registers::from_iter(4, 4, vec![2, 2, 2, 2]) };
+        let mut h1 = HLL::<4, 2> { registers: Registers::<4>::from_iter(4, vec![3, 1, 1, 3]) };
+        let h2 = HLL::<4, 2> { registers: Registers::<4>::from_iter(4, vec![2, 2, 2, 2]) };
 
-        h1.union(&h2).expect("union should be ok");
+        h1.union(&h2);
         assert_eq!(
             h1.registers.iter().collect::<Vec<u8>>(),
             vec![3, 2, 2, 3],
@@ -205,50 +182,81 @@ mod test_hll {
         );
     }
 
-    #[test]
-    fn test_union_incompatible() {
-        let mut h1 = HLL::new(4, 5).unwrap();
-        let mut h2 = HLL::new(6, 7).unwrap();
+    // #[test]
+    // fn test_union_incompatible() {
+    //     let mut h1 = HLL::<5, 4>::new();
+    //     let mut h2 = HLL::<7, 6>::new();
 
-        assert_eq!(Err(()), h1.union(&h2),);
-        assert_eq!(Err(()), h2.union(&h1),);
+    //     h1.union(&h2);
+    // }
+}
+
+// A fixed-size array of n-bit-wide registers used to back an HLL.
+//
+// Registers and RegisterIters allocate reference raw
+struct Registers<const N: usize> {
+    mem: *mut u8,
+    len: usize,
+}
+
+impl<const N: usize> Clone for Registers<N> {
+    fn clone(&self) -> Self {
+        let layout = Self::layout(self.len);
+
+        let mem = unsafe {
+            let dst = alloc(layout);
+            if dst.is_null() {
+                handle_alloc_error(layout);
+            }
+
+            self.mem.copy_to_nonoverlapping(dst, layout.size());
+
+            dst
+        };
+
+        Registers { mem, ..*self }
     }
 }
 
-// A fixed-size array of n-bit-wide registers
-//
-// Registers and RegisterIters are unsafe and reference raw
-struct Registers {
-    mem: *mut u8,
-    width: usize,
-    len: usize,
-    mask: u8,
+impl<const N: usize> Drop for Registers<N> {
+    fn drop(&mut self) {
+        let layout = Self::layout(self.len);
+        unsafe {
+            dealloc(self.mem, layout);
+        }
+    }
 }
 
-impl Registers {
+impl<const N: usize> Registers<N> {
     const MIN_WIDTH: usize = 1;
     const MAX_WIDTH: usize = 8;
 
-    fn alloc(width: usize, len: usize) -> Result<Registers, Error> {
-        if !(Self::MIN_WIDTH..=Self::MAX_WIDTH).contains(&width) {
-            return Err(Error::InvalidRegisterWidth);
-        }
-        let mask = Self::mask(width);
+    fn alloc(len: usize) -> Registers<N> {
+        assert!(
+            Self::MIN_WIDTH <= N && N <= Self::MAX_WIDTH,
+            "registers: invalid register width: {}",
+            N
+        );
 
-        let mem = unsafe { alloc_zeroed(Registers::layout(width, len)) };
+        let layout = Self::layout(len);
+        let mem = unsafe { alloc_zeroed(layout) };
         if mem.is_null() {
-            return Err(Error::AllocError);
+            handle_alloc_error(layout)
         }
 
-        Ok(Registers { mem, width, len, mask })
+        Registers { mem, len }
+    }
+
+    const fn mask() -> u8 {
+        ((1u64 << N) - 1) as u8
     }
 
     // TODO: bench this vs `if get(i) < v { set(i, v) }`
     fn set_max(&mut self, i: usize, v: u8) {
-        let v = v & self.mask;
-        let bits = self.width * i;
+        let v = v & (Self::mask() as u8);
+        let bits = N * i;
         let low_idx = bits / 8;
-        let high_idx = (bits + self.width - 1) / 8;
+        let high_idx = (bits + N - 1) / 8;
         let remainder = bits % 8;
 
         let low_byte = unsafe { *self.mem.add(low_idx) };
@@ -256,58 +264,53 @@ impl Registers {
 
         let current_v = ((low_byte >> remainder)
             | high_byte.checked_shl(8 - remainder as u32).unwrap_or(0))
-            & self.mask;
+            & Self::mask();
 
         if current_v < v {
             unsafe {
-                *self.mem.add(low_idx) &= !(self.mask << remainder);
+                *self.mem.add(low_idx) &= !(Self::mask() << remainder);
                 *self.mem.add(low_idx) |= v << remainder;
 
                 *self.mem.add(high_idx) &=
-                    !(self.mask.checked_shr(8 - remainder as u32).unwrap_or(0));
+                    !(Self::mask().checked_shr(8 - remainder as u32).unwrap_or(0));
                 *self.mem.add(high_idx) |= v.checked_shr(8 - remainder as u32).unwrap_or(0);
             }
         }
     }
 
     fn get(&self, i: usize) -> u8 {
-        let bits = self.width * i;
+        let bits = N * i;
         let low_idx = bits / 8;
-        let high_idx = (bits + self.width - 1) / 8;
+        let high_idx = (bits + N - 1) / 8;
         let remainder = bits % 8;
 
         let low_byte = unsafe { *self.mem.add(low_idx) };
         let high_byte = unsafe { *self.mem.add(high_idx) };
 
         ((low_byte >> remainder) | high_byte.checked_shl(8 - remainder as u32).unwrap_or(0))
-            & self.mask
+            & Self::mask()
     }
 
-    fn iter(&self) -> RegisterIterator {
+    fn iter(&self) -> RegisterIterator<N> {
         RegisterIterator { registers: self, idx: 0 }
     }
 
     #[inline]
-    fn layout(width: usize, len: usize) -> Layout {
-        let total_bits = width * len;
+    fn layout(len: usize) -> Layout {
+        let total_bits = N * len;
         let bytes = (total_bits / 8) + if (total_bits % 8) == 0 { 0 } else { 1 };
         Layout::from_size_align(bytes, 1).expect("invalid register layout")
-    }
-
-    #[inline]
-    fn mask(width: usize) -> u8 {
-        (((1 as u64) << width) - 1) as u8
     }
 }
 
 #[cfg(test)]
-impl Registers {
-    fn from_iter<I>(width: usize, len: usize, items: I) -> Registers
+impl<const N: usize> Registers<N> {
+    fn from_iter<I>(len: usize, items: I) -> Registers<N>
     where
         I: IntoIterator,
         <I as IntoIterator>::Item: Into<u8>,
     {
-        let mut registers = Registers::alloc(width, len).unwrap();
+        let mut registers = Registers::alloc(len);
 
         for (i, val) in items.into_iter().enumerate() {
             registers.set(i, val.into());
@@ -317,27 +320,19 @@ impl Registers {
     }
 
     fn set(&mut self, i: usize, v: u8) {
-        let v = v & self.mask;
-        let bits = self.width * i;
+        let v = v & Self::mask();
+        let bits = N * i;
         let low_idx = bits / 8;
-        let high_idx = (bits + self.width - 1) / 8;
+        let high_idx = (bits + N - 1) / 8;
         let remainder = bits % 8;
 
         unsafe {
-            *self.mem.add(low_idx) &= !(self.mask << remainder);
+            *self.mem.add(low_idx) &= !(Self::mask() << remainder);
             *self.mem.add(low_idx) |= v << remainder;
 
-            *self.mem.add(high_idx) &= !(self.mask.checked_shr(8 - remainder as u32).unwrap_or(0));
+            *self.mem.add(high_idx) &=
+                !(Self::mask().checked_shr(8 - remainder as u32).unwrap_or(0));
             *self.mem.add(high_idx) |= v.checked_shr(8 - remainder as u32).unwrap_or(0);
-        }
-    }
-}
-
-impl Drop for Registers {
-    fn drop(&mut self) {
-        let layout = Registers::layout(self.width, self.len);
-        unsafe {
-            dealloc(self.mem, layout);
         }
     }
 }
@@ -345,12 +340,12 @@ impl Drop for Registers {
 // An iterator that yields the current value of dense HLL registers. This
 // `struct` is created by the [`iter`] method on [`Registers`]. See its
 // documentation for more details.
-struct RegisterIterator<'a> {
-    registers: &'a Registers,
+struct RegisterIterator<'a, const N: usize> {
+    registers: &'a Registers<N>,
     idx: usize,
 }
 
-impl<'a> Iterator for RegisterIterator<'a> {
+impl<'a, const N: usize> Iterator for RegisterIterator<'a, N> {
     type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -367,38 +362,7 @@ impl<'a> Iterator for RegisterIterator<'a> {
 #[cfg(test)]
 mod test_registers {
     use super::*;
-    use quickcheck::{self, empty_shrinker, single_shrinker, Arbitrary, Gen};
     use quickcheck_macros::quickcheck;
-    use rand::Rng;
-
-    #[derive(Debug, Clone, Copy)]
-    struct RegisterSize {
-        width: usize,
-        len: usize,
-    }
-
-    impl RegisterSize {
-        fn registers(self) -> Result<Registers, Error> {
-            Registers::alloc(self.width, self.len)
-        }
-    }
-
-    impl Arbitrary for RegisterSize {
-        fn arbitrary<G: Gen>(g: &mut G) -> RegisterSize {
-            RegisterSize {
-                width: g.gen_range(Registers::MIN_WIDTH, Registers::MAX_WIDTH),
-                len: g.size(),
-            }
-        }
-
-        fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
-            if self.len <= 2 {
-                empty_shrinker()
-            } else {
-                single_shrinker(RegisterSize { width: self.width, len: self.len / 2 })
-            }
-        }
-    }
 
     #[test]
     fn test_set_get() {
@@ -412,7 +376,7 @@ mod test_registers {
         ];
 
         for (idx, val, expected_bits, expected_registers) in tcs {
-            let mut rs = RegisterSize { len: 4, width: 5 }.registers().unwrap();
+            let mut rs = Registers::<5>::alloc(4);
             rs.set(idx, val);
 
             let bits = {
@@ -438,26 +402,27 @@ mod test_registers {
 
     #[test]
     fn test_set_max() {
-        let mut rs = RegisterSize { len: 4, width: 5 }.registers().unwrap();
+        let mut rs = Registers::<5>::alloc(4);
 
-        println!("{:?}", rs.iter().collect::<Vec<u8>>());
-        for (idx, val) in vec![(1, 1), (1, 3), (1, 2)] {
-            rs.set(idx, val);
-            println!("{:?}", rs.iter().collect::<Vec<u8>>());
-        }
+        // set should reflect the most recent value
+        rs.set(1, 4);
+        rs.set(1, 3);
+        rs.set(1, 2);
         assert_eq!(rs.iter().collect::<Vec<u8>>(), vec![0, 2, 0, 0]);
 
-        // for (idx, val) in vec![(0, 3), (0, 1)] {
-        //     rs.set_max(idx, val);
-        // }
-        // assert_eq!(rs.iter().collect::<Vec<u8>>(), vec![3, 3, 0, 0]);
+        // set max should reflect the max value
+        rs.set_max(0, 2);
+        rs.set_max(0, 3);
+        rs.set_max(0, 1);
+        rs.set_max(0, 0);
+        assert_eq!(rs.iter().collect::<Vec<u8>>(), vec![3, 2, 0, 0]);
     }
 
     #[quickcheck]
-    fn check_layout(rs: RegisterSize) -> bool {
-        let layout = Registers::layout(rs.width, rs.len);
+    fn check_layout(len: usize) -> bool {
+        let layout = Registers::<3>::layout(len);
 
-        let total_bits = rs.width * rs.len;
+        let total_bits = 3 * len;
         let whole_bytes = total_bits / 8;
         let partial_bytes = if total_bits - (whole_bytes * 8) > 0 { 1 } else { 0 };
         let bytes = whole_bytes + partial_bytes;
@@ -465,45 +430,78 @@ mod test_registers {
         layout.size() == bytes
     }
 
-    #[quickcheck]
-    fn check_init_zeroed(rs: RegisterSize) -> bool {
-        let rs = rs.registers().unwrap();
-
-        (0..rs.len).map(|i| rs.get(i)).all(|v| v == 0)
+    macro_rules! check_zeroed {
+        ($n:tt, $len:expr) => {{
+            let rs = Registers::<$n>::alloc($len);
+            (0..rs.len).map(|i| rs.get(i)).all(|v| v == 0)
+        }};
     }
 
     #[quickcheck]
-    fn check_iter_length(rs: RegisterSize) -> bool {
-        rs.registers().unwrap().iter().count() == rs.len
+    fn check_init_zeroed(len: usize) -> bool {
+        [
+            check_zeroed!(1, len),
+            check_zeroed!(2, len),
+            check_zeroed!(3, len),
+            check_zeroed!(4, len),
+            check_zeroed!(5, len),
+            check_zeroed!(6, len),
+            check_zeroed!(7, len),
+            check_zeroed!(8, len),
+        ]
+        .iter()
+        .all(|v| *v)
+    }
+
+    macro_rules! check_iter_len {
+        ($n:tt, $len:expr) => {{
+            let rs = Registers::<$n>::alloc($len);
+            rs.iter().count() == rs.len
+        }};
     }
 
     #[quickcheck]
-    fn check_set_odd_even(rs: RegisterSize) -> bool {
-        let mut rs = rs.registers().unwrap();
-        let val = 0b10101010 & Registers::mask(rs.width);
+    fn check_iter_length(len: usize) -> bool {
+        [
+            check_iter_len!(1, len),
+            check_iter_len!(2, len),
+            check_iter_len!(3, len),
+            check_iter_len!(4, len),
+            check_iter_len!(5, len),
+            check_iter_len!(6, len),
+            check_iter_len!(7, len),
+            check_iter_len!(8, len),
+        ]
+        .iter()
+        .all(|v| *v)
+    }
 
-        for i in (0..rs.len).filter(|i| i % 2 == 0) {
-            rs.set(i, val);
-        }
+    macro_rules! check_set_max {
+        ($n:tt, $len:expr) => {{
+            let mut rs = Registers::<$n>::alloc($len);
+            let low_v = 1;
+            let high_v = (1 << $n) - 1;
 
-        let all_odds_zero = rs.iter().enumerate().filter(|&(i, _)| i % 2 == 1).all(|(_, v)| v == 0);
-        let all_evens_v = rs.iter().enumerate().filter(|&(i, _)| i % 2 == 0).all(|(_, v)| v == val);
+            for i in 0..rs.len {
+                rs.set_max(i, low_v);
+                rs.set_max(i, high_v);
+                rs.set_max(i, low_v);
+            }
 
-        all_odds_zero && all_evens_v
+            rs.iter().all(|v| v == high_v)
+        }};
     }
 
     #[quickcheck]
-    fn check_set_max(rs: RegisterSize) -> bool {
-        let mut rs = rs.registers().unwrap();
-        let low_v = 1;
-        let high_v = (1 << rs.width) - 1;
-
-        for i in 0..rs.len {
-            rs.set_max(i, low_v);
-            rs.set_max(i, high_v);
-            rs.set_max(i, low_v);
-        }
-
-        rs.iter().all(|v| v == high_v)
+    fn check_set_max(len: usize) -> bool {
+        [
+            check_set_max!(1, len),
+            check_set_max!(2, len),
+            check_set_max!(3, len),
+            check_set_max!(4, len),
+            check_set_max!(5, len),
+        ]
+        .iter()
+        .all(|&v| v)
     }
 }
