@@ -247,13 +247,11 @@ impl<const N: usize> Registers<N> {
         Registers { mem, len }
     }
 
-    const fn mask() -> u8 {
-        ((1u64 << N) - 1) as u8
-    }
+    const MASK: u8 = ((1u64 << N) - 1) as u8;
 
     // TODO: bench this vs `if get(i) < v { set(i, v) }`
     fn set_max(&mut self, i: usize, v: u8) {
-        let v = v & (Self::mask() as u8);
+        let v = v & (Self::MASK as u8);
         let bits = N * i;
         let low_idx = bits / 8;
         let high_idx = (bits + N - 1) / 8;
@@ -264,15 +262,15 @@ impl<const N: usize> Registers<N> {
 
         let current_v = ((low_byte >> remainder)
             | high_byte.checked_shl(8 - remainder as u32).unwrap_or(0))
-            & Self::mask();
+            & Self::MASK;
 
         if current_v < v {
             unsafe {
-                *self.mem.add(low_idx) &= !(Self::mask() << remainder);
+                *self.mem.add(low_idx) &= !(Self::MASK << remainder);
                 *self.mem.add(low_idx) |= v << remainder;
 
                 *self.mem.add(high_idx) &=
-                    !(Self::mask().checked_shr(8 - remainder as u32).unwrap_or(0));
+                    !(Self::MASK.checked_shr(8 - remainder as u32).unwrap_or(0));
                 *self.mem.add(high_idx) |= v.checked_shr(8 - remainder as u32).unwrap_or(0);
             }
         }
@@ -288,7 +286,7 @@ impl<const N: usize> Registers<N> {
         let high_byte = unsafe { *self.mem.add(high_idx) };
 
         ((low_byte >> remainder) | high_byte.checked_shl(8 - remainder as u32).unwrap_or(0))
-            & Self::mask()
+            & Self::MASK
     }
 
     fn iter(&self) -> RegisterIterator<N> {
@@ -320,18 +318,17 @@ impl<const N: usize> Registers<N> {
     }
 
     fn set(&mut self, i: usize, v: u8) {
-        let v = v & Self::mask();
+        let v = v & Self::MASK;
         let bits = N * i;
         let low_idx = bits / 8;
         let high_idx = (bits + N - 1) / 8;
         let remainder = bits % 8;
 
         unsafe {
-            *self.mem.add(low_idx) &= !(Self::mask() << remainder);
+            *self.mem.add(low_idx) &= !(Self::MASK << remainder);
             *self.mem.add(low_idx) |= v << remainder;
 
-            *self.mem.add(high_idx) &=
-                !(Self::mask().checked_shr(8 - remainder as u32).unwrap_or(0));
+            *self.mem.add(high_idx) &= !(Self::MASK.checked_shr(8 - remainder as u32).unwrap_or(0));
             *self.mem.add(high_idx) |= v.checked_shr(8 - remainder as u32).unwrap_or(0);
         }
     }
