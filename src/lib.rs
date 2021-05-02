@@ -186,14 +186,6 @@ mod test_hll {
             "unioned registers should be the pairwise max of registers in both HLLs"
         );
     }
-
-    // #[test]
-    // fn test_union_incompatible() {
-    //     let mut h1 = HLL::<5, 4>::new();
-    //     let mut h2 = HLL::<7, 6>::new();
-
-    //     h1.union(&h2);
-    // }
 }
 
 // A fixed-size array of n-bit-wide registers used to back an HLL.
@@ -421,7 +413,8 @@ mod test_registers {
     }
 
     #[quickcheck]
-    fn check_layout(len: usize) -> bool {
+    fn check_layout(len: u16) -> bool {
+        let len = len as usize;
         let layout = Registers::<3>::layout(len);
 
         let total_bits = 3 * len;
@@ -440,7 +433,8 @@ mod test_registers {
     }
 
     #[quickcheck]
-    fn check_init_zeroed(len: usize) -> bool {
+    fn check_init_zeroed(len: u16) -> bool {
+        let len = len as usize;
         [
             check_zeroed!(1, len),
             check_zeroed!(2, len),
@@ -463,7 +457,8 @@ mod test_registers {
     }
 
     #[quickcheck]
-    fn check_iter_length(len: usize) -> bool {
+    fn check_iter_length(len: u16) -> bool {
+        let len = len as usize;
         [
             check_iter_len!(1, len),
             check_iter_len!(2, len),
@@ -495,7 +490,8 @@ mod test_registers {
     }
 
     #[quickcheck]
-    fn check_set_max(len: usize) -> bool {
+    fn check_set_max(len: u16) -> bool {
+        let len = len as usize;
         [
             check_set_max!(1, len),
             check_set_max!(2, len),
