@@ -84,6 +84,11 @@ impl<const W: usize, const B: usize> HLL<W, B> {
         }
     }
 
+    // NOTE: the large/small estimators and cutoffs can be consts once
+    //       floating point const arithmetic stabilizes.
+    //
+    //       see: https://github.com/rust-lang/rust/issues/57241
+
     #[inline]
     fn estimator_and_zeros(&self) -> (f64, usize) {
         let mut sum: f64 = 0.0;
@@ -125,21 +130,21 @@ impl<const W: usize, const B: usize> HLL<W, B> {
 
     #[inline]
     fn large_estimator_cutoff() -> f64 {
-        Self::two_to_l(B) / 30.0
+        Self::two_to_l() / 30.0
     }
 
     #[inline]
     fn large_estimator(est: f64) -> f64 {
-        let ttl = Self::two_to_l(B);
+        let ttl = Self::two_to_l();
         -1.0 * ttl * (1.0 - est / ttl).ln()
     }
 
     #[inline]
-    fn two_to_l(log2m: usize) -> f64 {
+    fn two_to_l() -> f64 {
         // this needs to be -2 instead of -1 to account for the fact that
         // p_w(0) = 1 and not 0
         let max_register_val = (1 << W) - 1 - 1;
-        (2.0_f64).powi((max_register_val + log2m) as i32)
+        (2.0_f64).powi((max_register_val + B) as i32)
     }
 }
 
