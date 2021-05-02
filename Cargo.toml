@@ -5,6 +5,6 @@ authors = ["benl"]
 edition = "2018"
 
 [dev-dependencies]
-rand = "0.7"
+rand = "0.8"
 quickcheck = "1"
 quickcheck_macros = "1"
