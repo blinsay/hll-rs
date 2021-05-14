@@ -1,53 +1,47 @@
 use std::alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout};
 
-// TODO: docs
-// TODO: serialization
+// TODO: Serialization compatible with postgres-hll.
+//
+// https://github.com/citusdata/postgresql-hll
 
-// It would be awesome to provide no_std support. Math isn't stable in core
+// TODO: Provide no_std support once it lands. Math isn't stable in core
 // and the intrinsics required for ln and powi are nightly only.
 //
 // https://github.com/rust-lang/rfcs/issues/2505
 
-// A toy implementation of HyperLogLog.
-//
-// This implementation is BYO Hash Function - callers should add data to the
-// HLL using the [`iter`] method. Data should already be a 64-bit value
-// drawn from a uniform distribution (read: hashed well).
+/// A toy implementation of [HyperLogLog](http://algo.inria.fr/flajolet/Publications/FlFuGaMe07.pdf).
+///
+/// This implementation does not require a specific Hash Function - callers
+/// required to hash data before adding it with add_raw. Data must be uniformly
+/// distributed before being added - Murmurhash or FNV-1a are good candidates.
 #[allow(clippy::upper_case_acronyms)]
 pub struct HLL<const W: usize, const B: usize> {
     registers: Registers<W>,
 }
 
 impl<const W: usize, const B: usize> HLL<W, B> {
-    // Create a new HLL with the given register width and log2m set to the
-    // given value. log2m must not be zero.
+    /// Create a new HLL with the given register width and log2m set to the
+    /// given value. log2m must not be zero.
     #[allow(clippy::new_without_default)]
     pub fn new() -> HLL<W, B> {
-        let registers = Registers::alloc(Self::m());
+        let registers = Registers::alloc(Self::M);
         HLL { registers }
     }
 
-    // The number of registers used in this HLL.
-    #[inline]
-    pub const fn m() -> usize {
-        1 << B
-    }
+    /// The constant M, the number of registers in this HLL. This is an alias
+    /// for Self::REG_COUNT.
+    pub const M: usize = 1 << B;
 
-    // The width of the registers in this HLL.
-    #[inline]
-    pub const fn register_width(&self) -> usize {
-        W
-    }
+    /// The width of the registers in this HLL, in bits.
+    pub const REGISTER_WIDTH: usize = W;
 
-    #[inline]
-    pub const fn register_count(&self) -> usize {
-        Self::m()
-    }
+    /// The number of registers in this HLL.
+    pub const REGISTER_COUNT: usize = Self::M;
 
-    // Add a raw value to the multiset. The value MUST have been hashed or
-    // drawn from a uniform distribution.
+    /// Add a raw value to the this HLL. The value MUST have been hashed or
+    /// drawn from a uniform distribution.
     pub fn add_raw(&mut self, value: u64) {
-        let j = (value as usize) & (Self::m() - 1);
+        let j = (value as usize) & (Self::M - 1);
         let w = value >> B;
 
         // NOTE: the paper defines p(0^k) == k + 1 but 0.trailing_zeros() == 0
@@ -63,7 +57,7 @@ impl<const W: usize, const B: usize> HLL<W, B> {
         self.registers.set_max(j, p_w as u8);
     }
 
-    // Returns an estimate of the cardinality of the multiset.
+    /// The estimated cardinality of this HLL.
     pub fn cardinality(&self) -> f64 {
         match self.estimator_and_zeros() {
             (e, z) if z > 0 && e <= Self::small_estimator_cutoff() => Self::small_estimator(z),
@@ -72,12 +66,8 @@ impl<const W: usize, const B: usize> HLL<W, B> {
         }
     }
 
-    // Union another HLL value into this one. This is equivalent to setting
-    // every register in this HLL to the max of it's current value and the
-    // corresponding register in the other HLL.
-    //
-    // Does not validate that the two HLLs are compatible, and will panic if
-    // other has a higher log2m value than self.
+    /// Union this HLL with another one. This preserves the accuracy of the
+    /// estimates of both HLLs.
     pub fn union(&mut self, other: &Self) {
         for (i, v) in other.registers.iter().enumerate() {
             self.registers.set_max(i, v);
@@ -106,8 +96,8 @@ impl<const W: usize, const B: usize> HLL<W, B> {
 
     #[inline]
     fn alpha_m_squared() -> f64 {
-        let mf = Self::m() as f64;
-        let alpha = match Self::m() {
+        let mf = Self::M as f64;
+        let alpha = match Self::M {
             16 => 0.673,
             32 => 0.697,
             64 => 0.709,
@@ -118,12 +108,12 @@ impl<const W: usize, const B: usize> HLL<W, B> {
 
     #[inline]
     fn small_estimator_cutoff() -> f64 {
-        (5.0 / 2.0) * (Self::m() as f64)
+        (5.0 / 2.0) * (Self::M as f64)
     }
 
     #[inline]
     fn small_estimator(zeros: usize) -> f64 {
-        let m = Self::m() as f64;
+        let m = Self::M as f64;
         let zeros = zeros as f64;
         m * (m / zeros).ln()
     }
@@ -155,7 +145,7 @@ impl<const W: usize, const B: usize> std::fmt::Debug for HLL<W, B> {
         writeln!(
             f,
             "HLL {{ m={}, b={}, reg_width={}, zeros={}, estimator={} }}",
-            Self::m(),
+            Self::M,
             B,
             W,
             zeros,
