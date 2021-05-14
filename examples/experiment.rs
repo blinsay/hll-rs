@@ -10,6 +10,7 @@ fn main() {
     let mut rng = rand::thread_rng();
     let mut explicit = BTreeSet::new();
     let mut approx: HLL<5, 16> = HLL::new();
+    let approx_size = HLL::<5, 6>::REGISTER_WIDTH * HLL::<5, 16>::REGISTER_COUNT;
 
     println!("iterations,exact_cardinality,exact_size,hll_cardinality,hll_size,measurement_error");
 
@@ -23,7 +24,6 @@ fn main() {
             let approximate = approx.cardinality().round();
             let measurement_error = measurement_error(exact as f64, approximate);
             let exact_size = explicit.len() * 8;
-            let approx_size = approx.register_width() * approx.register_count();
             println!(
                 "{},{},{},{},{},{:0.6}",
                 i,
